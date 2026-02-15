@@ -1,0 +1,473 @@
+#!/usr/bin/env bash
+# tmux shim for claude-code-emacs-panes
+#
+# Intercepts tmux commands from Claude Code and translates them into
+# emacsclient --eval calls that create/manage vterm buffers in Emacs.
+
+# --- Guard: fall through to real tmux if not in emacs-panes mode ---
+if [[ -z "$CLAUDE_CODE_EMACS_PANES" ]]; then
+    exec /usr/bin/tmux "$@"
+fi
+
+# --- Configuration ---
+STATE_DIR="${TMPDIR:-/tmp}/claude-emacs-panes-${CLAUDE_CODE_EMACS_PANES_PID:-$$}"
+COUNTER_FILE="$STATE_DIR/counter"
+LOG_FILE="${TMPDIR:-/tmp}/claude-emacs-panes.log"
+
+# --- Debug logging ---
+log_debug() {
+    if [[ "$CLAUDE_CODE_EMACS_PANES_DEBUG" == "1" ]]; then
+        echo "[$(date '+%H:%M:%S.%N')] [$$] $*" >> "$LOG_FILE"
+    fi
+}
+
+log_debug "tmux shim called with args: $*"
+
+# --- Ensure state directory exists ---
+mkdir -p "$STATE_DIR"
+
+# --- Helper: call emacsclient and strip surrounding quotes from output ---
+emacs_eval() {
+    local result
+    result=$(emacsclient --socket-name "$EMACS_PANES_SERVER" --eval "$1" 2>/dev/null)
+    # Strip surrounding double quotes if present
+    if [[ "$result" =~ ^\"(.*)\"$ ]]; then
+        result="${BASH_REMATCH[1]}"
+    fi
+    log_debug "emacs_eval: $1 -> $result"
+    echo "$result"
+}
+
+# --- Helper: get next synthetic pane ID ---
+next_pane_id() {
+    local counter=0
+    if [[ -f "$COUNTER_FILE" ]]; then
+        counter=$(< "$COUNTER_FILE")
+    fi
+    counter=$((counter + 1))
+    echo "$counter" > "$COUNTER_FILE"
+    echo "%emacs-${counter}"
+}
+
+# --- Helper: store pane mapping ---
+store_pane() {
+    local pane_id="$1"
+    local buffer_name="$2"
+    # Use the pane ID as filename (replace % with _)
+    local safe_name="${pane_id//%/_}"
+    echo "$buffer_name" > "$STATE_DIR/$safe_name"
+    log_debug "Stored pane mapping: $pane_id -> $buffer_name"
+}
+
+# --- Helper: remove pane mapping ---
+remove_pane() {
+    local pane_id="$1"
+    local safe_name="${pane_id//%/_}"
+    rm -f "$STATE_DIR/$safe_name"
+    log_debug "Removed pane mapping: $pane_id"
+}
+
+# --- Helper: escape a string for use inside an elisp double-quoted string ---
+elisp_escape() {
+    local s="$1"
+    # Escape backslashes first, then double quotes
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    echo "$s"
+}
+
+# --- No subcommand: just version-like behavior ---
+if [[ $# -eq 0 ]]; then
+    exit 0
+fi
+
+# --- Main command dispatch ---
+subcmd="$1"
+shift
+
+case "$subcmd" in
+
+    # --- Version ---
+    -V)
+        echo "tmux 3.4"
+        exit 0
+        ;;
+
+    # --- display-message ---
+    display-message)
+        # Parse args to find the format string
+        format_str=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                -p)
+                    shift
+                    if [[ $# -gt 0 ]]; then
+                        format_str="$1"
+                    fi
+                    ;;
+                -t)
+                    shift  # skip target
+                    ;;
+                *)
+                    # Could be the format string if -p was already seen without arg
+                    if [[ -z "$format_str" ]]; then
+                        format_str="$1"
+                    fi
+                    ;;
+            esac
+            shift
+        done
+
+        log_debug "display-message format: $format_str"
+
+        # Strip surrounding quotes from format string
+        format_str="${format_str#\"}"
+        format_str="${format_str%\"}"
+        format_str="${format_str#\'}"
+        format_str="${format_str%\'}"
+
+        case "$format_str" in
+            *'#{session_name}:#{window_index}'*|*'#{session_name}'*:*'#{window_index}'*)
+                echo "emacs-panes:0"
+                ;;
+            *'#{pane_id}'*)
+                echo "%0"
+                ;;
+            *'#{session_name}'*)
+                echo "emacs-panes"
+                ;;
+            *'#{window_index}'*)
+                echo "0"
+                ;;
+            *)
+                echo "emacs-panes:0"
+                ;;
+        esac
+        exit 0
+        ;;
+
+    # --- split-window ---
+    split-window)
+        target_pane=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                -t)
+                    shift
+                    target_pane="$1"
+                    ;;
+                -h|-v|-P|-d)
+                    ;;  # Ignore layout flags
+                -l|-F)
+                    shift  # Skip the value argument
+                    ;;
+                *)
+                    ;;  # Ignore other args
+            esac
+            shift
+        done
+
+        log_debug "split-window: target=$target_pane"
+
+        # Call Emacs to create a pane
+        result=$(emacs_eval "(claude-code-emacs-panes-create-pane)")
+
+        if [[ -n "$result" && "$result" != "nil" ]]; then
+            # Emacs returned the pane ID directly
+            store_pane "$result" "$result"
+            echo "$result"
+        else
+            # Fallback: generate our own ID
+            pane_id=$(next_pane_id)
+            store_pane "$pane_id" "$pane_id"
+            echo "$pane_id"
+        fi
+        exit 0
+        ;;
+
+    # --- send-keys ---
+    send-keys)
+        target_pane=""
+        args=()
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                -t)
+                    shift
+                    target_pane="$1"
+                    ;;
+                *)
+                    args+=("$1")
+                    ;;
+            esac
+            shift
+        done
+
+        # Remove trailing Enter / C-m / C-c from the args (these are tmux key names)
+        # Build the command text from the remaining args
+        cmd_parts=()
+        for arg in "${args[@]}"; do
+            case "$arg" in
+                Enter|C-m)
+                    ;;  # Skip, it's the "press enter" directive
+                C-c)
+                    # Send interrupt to the vterm process
+                    log_debug "send-keys: C-c to $target_pane"
+                    emacs_eval "(claude-code-emacs-panes-send-interrupt \"$(elisp_escape "$target_pane")\")" > /dev/null
+                    exit 0
+                    ;;
+                *)
+                    cmd_parts+=("$arg")
+                    ;;
+            esac
+        done
+
+        # Join command parts with spaces
+        cmd_text="${cmd_parts[*]}"
+
+        # Strip surrounding quotes if the whole thing is quoted
+        if [[ "$cmd_text" =~ ^\"(.*)\"$ ]]; then
+            cmd_text="${BASH_REMATCH[1]}"
+        elif [[ "$cmd_text" =~ ^\'(.*)\'$ ]]; then
+            cmd_text="${BASH_REMATCH[1]}"
+        fi
+
+        log_debug "send-keys: target=$target_pane cmd=$cmd_text"
+
+        if [[ -n "$cmd_text" ]]; then
+            escaped_cmd=$(elisp_escape "$cmd_text")
+            escaped_pane=$(elisp_escape "$target_pane")
+            emacs_eval "(claude-code-emacs-panes-send-keys \"$escaped_pane\" \"$escaped_cmd\")" > /dev/null
+        fi
+        exit 0
+        ;;
+
+    # --- kill-pane ---
+    kill-pane)
+        target_pane=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                -t)
+                    shift
+                    target_pane="$1"
+                    ;;
+                *)
+                    ;;
+            esac
+            shift
+        done
+
+        log_debug "kill-pane: target=$target_pane"
+
+        if [[ -n "$target_pane" ]]; then
+            escaped_pane=$(elisp_escape "$target_pane")
+            emacs_eval "(claude-code-emacs-panes-kill-pane \"$escaped_pane\")" > /dev/null
+            remove_pane "$target_pane"
+        fi
+        exit 0
+        ;;
+
+    # --- select-layout ---
+    select-layout)
+        # select-layout -t TARGET tiled
+        log_debug "select-layout: $*"
+        emacs_eval "(claude-code-emacs-panes-rebalance)" > /dev/null
+        exit 0
+        ;;
+
+    # --- list-panes ---
+    list-panes)
+        # list-panes -t TARGET -F "#{pane_id}"
+        target=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                -t)
+                    shift
+                    target="$1"
+                    ;;
+                -F)
+                    shift  # skip format
+                    ;;
+                *)
+                    ;;
+            esac
+            shift
+        done
+
+        log_debug "list-panes: target=$target"
+
+        result=$(emacs_eval "(claude-code-emacs-panes-list-panes)")
+        if [[ -n "$result" && "$result" != "nil" ]]; then
+            echo "$result"
+        else
+            echo "%0"
+        fi
+        exit 0
+        ;;
+
+    # --- list-windows ---
+    list-windows)
+        log_debug "list-windows: $*"
+        echo "main"
+        exit 0
+        ;;
+
+    # --- has-session ---
+    has-session)
+        session_name=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                -t)
+                    shift
+                    session_name="$1"
+                    ;;
+                *)
+                    ;;
+            esac
+            shift
+        done
+
+        log_debug "has-session: name=$session_name"
+
+        if [[ -n "$session_name" ]]; then
+            escaped_name=$(elisp_escape "$session_name")
+            result=$(emacs_eval "(claude-code-emacs-panes-has-session \"$escaped_name\")")
+            if [[ "$result" == "t" ]]; then
+                exit 0
+            else
+                exit 1
+            fi
+        fi
+        exit 1
+        ;;
+
+    # --- new-session ---
+    new-session)
+        session_name=""
+        window_name=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                -d)
+                    ;;  # detached, ignore
+                -s)
+                    shift
+                    session_name="$1"
+                    ;;
+                -n)
+                    shift
+                    window_name="$1"
+                    ;;
+                -P)
+                    ;;  # print, ignore
+                -F)
+                    shift  # skip format
+                    ;;
+                -x|-y)
+                    shift  # skip dimensions
+                    ;;
+                *)
+                    ;;
+            esac
+            shift
+        done
+
+        log_debug "new-session: name=$session_name window=$window_name"
+
+        if [[ -n "$session_name" ]]; then
+            escaped_name=$(elisp_escape "$session_name")
+            emacs_eval "(claude-code-emacs-panes-register-session \"$escaped_name\")" > /dev/null
+        fi
+        echo "%0"
+        exit 0
+        ;;
+
+    # --- new-window ---
+    new-window)
+        session=""
+        window_name=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                -t)
+                    shift
+                    session="$1"
+                    ;;
+                -n)
+                    shift
+                    window_name="$1"
+                    ;;
+                -P)
+                    ;;
+                -F)
+                    shift  # skip format
+                    ;;
+                *)
+                    ;;
+            esac
+            shift
+        done
+
+        log_debug "new-window: session=$session window=$window_name"
+
+        # Create a new pane (window maps to pane in our model)
+        result=$(emacs_eval "(claude-code-emacs-panes-create-pane)")
+
+        if [[ -n "$result" && "$result" != "nil" ]]; then
+            store_pane "$result" "$result"
+            echo "$result"
+        else
+            pane_id=$(next_pane_id)
+            store_pane "$pane_id" "$pane_id"
+            echo "$pane_id"
+        fi
+        exit 0
+        ;;
+
+    # --- set-option ---
+    set-option|set)
+        log_debug "set-option: $*"
+        exit 0
+        ;;
+
+    # --- select-pane ---
+    select-pane)
+        target_pane=""
+        title=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                -t)
+                    shift
+                    target_pane="$1"
+                    ;;
+                -T)
+                    shift
+                    title="$1"
+                    ;;
+                -P)
+                    shift  # skip style string
+                    ;;
+                *)
+                    ;;
+            esac
+            shift
+        done
+
+        log_debug "select-pane: target=$target_pane title=$title"
+
+        if [[ -n "$target_pane" && -n "$title" ]]; then
+            escaped_pane=$(elisp_escape "$target_pane")
+            escaped_title=$(elisp_escape "$title")
+            emacs_eval "(claude-code-emacs-panes-set-pane-info \"$escaped_pane\" \"$escaped_title\" nil)" > /dev/null
+        fi
+        exit 0
+        ;;
+
+    # --- resize-pane ---
+    resize-pane)
+        log_debug "resize-pane: $*"
+        exit 0
+        ;;
+
+    # --- Catch-all: graceful no-op ---
+    *)
+        log_debug "unhandled subcommand: $subcmd $*"
+        exit 0
+        ;;
+esac
