@@ -6,7 +6,17 @@
 
 # --- Guard: fall through to real tmux if not in emacs-panes mode ---
 if [[ -z "$CLAUDE_CODE_EMACS_PANES" ]]; then
-    exec /usr/bin/tmux "$@"
+    # Remove our shim directory from PATH so we find the real tmux
+    _shim_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    _clean_path=$(echo "$PATH" | tr ':' '\n' | grep -v "^${_shim_dir}$" | tr '\n' ':')
+    _clean_path="${_clean_path%:}"
+    _real_tmux=$(PATH="$_clean_path" command -v tmux 2>/dev/null)
+    if [[ -n "$_real_tmux" ]]; then
+        exec "$_real_tmux" "$@"
+    else
+        echo "tmux: command not found" >&2
+        exit 127
+    fi
 fi
 
 # --- Configuration ---
