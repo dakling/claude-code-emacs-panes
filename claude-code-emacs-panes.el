@@ -356,16 +356,27 @@ This is the main interactive entry point."
         (vterm-send-return))
       (pop-to-buffer buf))))
 
+(defvar claude-code-ide-cli-extra-flags)
+
 (defun claude-code-emacs-panes-setup ()
   "Set up the Claude Code panes integration.
 Call this from your Doom config (or init file) to wire up the
-environment injection advice and ensure the Emacs server is running."
+environment injection advice and ensure the Emacs server is running.
+Also configures `claude-code-ide-cli-extra-flags' to include
+`--teammate-mode tmux' so agent teams use the tmux backend (which
+our shim intercepts)."
   (interactive)
   (unless (server-running-p)
     (server-start))
   ;; Advise the internal session starter, which handles both vterm and eat
   (advice-add 'claude-code-ide--start-session :around
-              #'claude-code-emacs-panes--inject-env))
+              #'claude-code-emacs-panes--inject-env)
+  ;; Force tmux teammate mode so agent teams go through our shim
+  (when (boundp 'claude-code-ide-cli-extra-flags)
+    (let ((existing (or claude-code-ide-cli-extra-flags "")))
+      (unless (string-match-p "--teammate-mode" existing)
+        (setq claude-code-ide-cli-extra-flags
+              (string-trim (concat existing " --teammate-mode tmux")))))))
 
 (provide 'claude-code-emacs-panes)
 ;;; claude-code-emacs-panes.el ends here
