@@ -293,10 +293,14 @@ Returns \"ok\"."
 
 ;;; --- Shim directory helper ----------------------------------------------
 
+(defvar claude-code-emacs-panes--package-dir
+  (file-name-directory (or load-file-name buffer-file-name))
+  "Directory where this package is installed.
+Captured at load time because `load-file-name' is nil at runtime.")
+
 (defun claude-code-emacs-panes--shim-dir ()
   "Return the path to the bin/ directory shipped with this package."
-  (expand-file-name "bin" (file-name-directory
-                           (or load-file-name buffer-file-name))))
+  (expand-file-name "bin" claude-code-emacs-panes--package-dir))
 
 ;;; --- Environment injection / setup --------------------------------------
 
@@ -311,6 +315,7 @@ Returns \"ok\"."
           "TMUX=emacs-panes,0,0"
           "TMUX_PANE=%0"
           "CLAUDE_CODE_EMACS_PANES=1"
+          "CLAUDE_CODE_EMACS_PANES_DEBUG=1"
           (format "CLAUDE_CODE_EMACS_PANES_PID=%s" pid-tag)
           (format "EMACS_PANES_SERVER=%s" (or server-name "server")))))
 
