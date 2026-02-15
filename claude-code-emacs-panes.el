@@ -300,48 +300,56 @@ Returns \"ok\"."
 
 ;;; --- Environment injection / setup --------------------------------------
 
-(defun claude-code-emacs-panes--inject-env (orig-fn &rest args)
-  "Around-advice for `claude-code-ide-open' that injects pane env vars.
-ORIG-FN is the original function, ARGS are its arguments."
+(defvar vterm-environment)
+
+(defun claude-code-emacs-panes--env-vars ()
+  "Return a list of \"KEY=VALUE\" strings for the pane environment."
   (let ((shim-dir (claude-code-emacs-panes--shim-dir))
-        (process-environment (cl-copy-list process-environment)))
-    (setenv "PATH" (concat shim-dir ":" (getenv "PATH")))
-    (setenv "TMUX" "emacs-panes,0,0")
-    (setenv "TMUX_PANE" "%0")
-    (setenv "CLAUDE_CODE_EMACS_PANES" "1")
-    (setenv "CLAUDE_CODE_EMACS_PANES_PID"
-            (format "%d-%d" (emacs-pid)
-                    (cl-incf claude-code-emacs-panes--next-id)))
-    (setenv "EMACS_PANES_SERVER" (or server-name "server"))
+        (pid-tag (format "%d-%d" (emacs-pid)
+                         (cl-incf claude-code-emacs-panes--next-id))))
+    (list (format "PATH=%s:%s" shim-dir (getenv "PATH"))
+          "TMUX=emacs-panes,0,0"
+          "TMUX_PANE=%0"
+          "CLAUDE_CODE_EMACS_PANES=1"
+          (format "CLAUDE_CODE_EMACS_PANES_PID=%s" pid-tag)
+          (format "EMACS_PANES_SERVER=%s" (or server-name "server")))))
+
+(defun claude-code-emacs-panes--inject-env (orig-fn &rest args)
+  "Around-advice for `claude-code-ide--start-session'.
+Injects pane env vars into both `vterm-environment' (for vterm backend)
+and `process-environment' (for eat backend).
+ORIG-FN is the original function, ARGS are its arguments."
+  (let* ((extra (claude-code-emacs-panes--env-vars))
+         ;; vterm reads vterm-environment to set env vars in the terminal
+         (vterm-environment (append extra (when (boundp 'vterm-environment)
+                                            vterm-environment)))
+         ;; eat reads process-environment
+         (process-environment (append extra (cl-copy-list process-environment))))
     (apply orig-fn args)))
 
 (defun claude-code-emacs-panes-start-claude ()
   "Start a Claude Code session with pane environment injected.
 This is the main interactive entry point."
   (interactive)
-  (require 'claude-code-ide)
   (unless (server-running-p)
     (server-start))
-  (let ((shim-dir (claude-code-emacs-panes--shim-dir))
-        (process-environment (cl-copy-list process-environment)))
-    (setenv "PATH" (concat shim-dir ":" (getenv "PATH")))
-    (setenv "TMUX" "emacs-panes,0,0")
-    (setenv "TMUX_PANE" "%0")
-    (setenv "CLAUDE_CODE_EMACS_PANES" "1")
-    (setenv "CLAUDE_CODE_EMACS_PANES_PID"
-            (format "%d-%d" (emacs-pid)
-                    (cl-incf claude-code-emacs-panes--next-id)))
-    (setenv "EMACS_PANES_SERVER" (or server-name "server"))
-    (if (fboundp 'claude-code-ide-open)
-        (claude-code-ide-open)
-      ;; Fallback: create a plain vterm running claude.
-      (require 'vterm)
-      (let ((buf (generate-new-buffer "*claude-code*")))
-        (with-current-buffer buf
-          (vterm-mode)
-          (vterm-send-string "claude")
-          (vterm-send-return))
-        (pop-to-buffer buf)))))
+  (if (fboundp 'claude-code-ide)
+      (let* ((extra (claude-code-emacs-panes--env-vars))
+             (vterm-environment (append extra (when (boundp 'vterm-environment)
+                                                vterm-environment)))
+             (process-environment (append extra (cl-copy-list process-environment))))
+        (claude-code-ide))
+    ;; Fallback: create a plain vterm running claude.
+    (require 'vterm)
+    (let* ((extra (claude-code-emacs-panes--env-vars))
+           (vterm-environment (append extra (when (boundp 'vterm-environment)
+                                              vterm-environment)))
+           (buf (generate-new-buffer "*claude-code*")))
+      (with-current-buffer buf
+        (vterm-mode)
+        (vterm-send-string "claude")
+        (vterm-send-return))
+      (pop-to-buffer buf))))
 
 (defun claude-code-emacs-panes-setup ()
   "Set up the Claude Code panes integration.
@@ -350,7 +358,8 @@ environment injection advice and ensure the Emacs server is running."
   (interactive)
   (unless (server-running-p)
     (server-start))
-  (advice-add 'claude-code-ide-open :around
+  ;; Advise the internal session starter, which handles both vterm and eat
+  (advice-add 'claude-code-ide--start-session :around
               #'claude-code-emacs-panes--inject-env))
 
 (provide 'claude-code-emacs-panes)
