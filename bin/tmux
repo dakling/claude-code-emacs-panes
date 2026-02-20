@@ -3,6 +3,11 @@
 #
 # Intercepts tmux commands from Claude Code and translates them into
 # emacsclient --eval calls that create/manage vterm buffers in Emacs.
+#
+# Handles all 13 tmux subcommands used by Claude Code v2.1.47+:
+# display-message, has-session, kill-pane, list-panes, list-windows,
+# new-session, new-window, resize-pane, select-layout, select-pane,
+# send-keys, set-option, split-window
 
 # --- Guard: fall through to real tmux if not in emacs-panes mode ---
 if [[ -z "$CLAUDE_CODE_EMACS_PANES" ]]; then
@@ -38,8 +43,16 @@ mkdir -p "$STATE_DIR"
 
 # --- Helper: call emacsclient and strip surrounding quotes from output ---
 emacs_eval() {
-    local result
-    result=$(emacsclient --socket-name "$EMACS_PANES_SERVER" --eval "$1" 2>/dev/null)
+    local result exit_code err_msg
+    result=$(emacsclient --socket-name "$EMACS_PANES_SERVER" --eval "$1" 2>"$STATE_DIR/emacsclient-err")
+    exit_code=$?
+    if [[ $exit_code -ne 0 ]]; then
+        err_msg=$(< "$STATE_DIR/emacsclient-err" 2>/dev/null)
+        log_debug "emacsclient FAILED (exit $exit_code): $err_msg"
+        echo "" >&2
+        echo ""
+        return 1
+    fi
     # Strip surrounding double quotes if present
     if [[ "$result" =~ ^\"(.*)\"$ ]]; then
         result="${BASH_REMATCH[1]}"

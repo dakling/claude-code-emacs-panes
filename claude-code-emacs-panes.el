@@ -30,6 +30,7 @@
 
 (defvar server-name)
 (defvar vterm-kill-buffer-on-exit)
+(defvar vterm-environment)
 
 ;;; --- Customization group ------------------------------------------------
 
@@ -66,13 +67,21 @@
 
 (defun claude-code-emacs-panes-create-pane (&optional name)
   "Create a new vterm pane, optionally named NAME.
-Returns the pane-id string (for use by emacsclient)."
+Returns the pane-id string (for use by emacsclient).
+
+Injects the pane environment variables (PATH with shim dir, TMUX, TMUX_PANE,
+CLAUDE_CODE_EMACS_PANES, EMACS_PANES_SERVER) into the new vterm buffer via
+`vterm-environment' so that nested agent spawning works from the new pane."
   (require 'vterm)
   (cl-incf claude-code-emacs-panes--next-id)
   (let* ((pane-id (format "%%emacs-%d" claude-code-emacs-panes--next-id))
          (buffer-name (format "%s%s*" claude-code-emacs-panes-buffer-prefix
                               (or name pane-id)))
-         (buf (generate-new-buffer buffer-name)))
+         (buf (generate-new-buffer buffer-name))
+         ;; Inject env vars so nested agents can find the shim and call emacsclient
+         (extra (claude-code-emacs-panes--env-vars))
+         (vterm-environment (append extra (when (boundp 'vterm-environment)
+                                            vterm-environment))))
     (with-current-buffer buf
       (vterm-mode)
       (setq-local vterm-kill-buffer-on-exit nil))
@@ -362,8 +371,6 @@ Otherwise fall back to the package directory."
 
 ;;; --- Environment injection / setup --------------------------------------
 
-(defvar vterm-environment)
-
 (defun claude-code-emacs-panes--env-vars ()
   "Return a list of \"KEY=VALUE\" strings for the pane environment."
   (let ((shim-dir (claude-code-emacs-panes--shim-dir))
@@ -436,7 +443,9 @@ our shim intercepts)."
   ;; Advise the internal session starter, which handles both vterm and eat
   (advice-add 'claude-code-ide--start-session :around
               #'claude-code-emacs-panes--inject-env)
-  ;; Force tmux teammate mode so agent teams go through our shim
+  ;; Force tmux teammate mode so agent teams go through our shim.
+  ;; --teammate-mode tmux is a hidden but valid flag in Claude Code v2.1.47+
+  ;; Forces tmux backend for agent teams (our shim intercepts these calls)
   (when (boundp 'claude-code-ide-cli-extra-flags)
     (let ((existing (or claude-code-ide-cli-extra-flags "")))
       (unless (string-match-p "--teammate-mode" existing)
