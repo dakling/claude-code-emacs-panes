@@ -298,9 +298,67 @@ Returns \"ok\"."
   "Directory where this package is installed.
 Captured at load time because `load-file-name' is nil at runtime.")
 
+(defvar claude-code-emacs-panes--shim-validated nil
+  "Latch variable for shim validation state.
+nil means not yet checked; t means validated and working;
+\\='fallback means shim not found — fall back to native tmux for session.")
+
+(defvar claude-code-emacs-panes--shim-path nil
+  "Cached absolute path to the validated bin/tmux shim.
+Set by `claude-code-emacs-panes--validate-and-fix-shim' after first use.")
+
+(defun claude-code-emacs-panes--find-shim ()
+  "Search for the bin/tmux shim in known locations.
+Search order:
+1. `claude-code-emacs-panes--package-dir'/bin/tmux  (primary — straight.el build dir)
+2. ~/.config/emacs/.local/straight/repos/claude-code-emacs-panes/bin/tmux  (repos fallback)
+3. ~/code/emacs-packages/claude-code-emacs-panes/bin/tmux  (dev source fallback)
+Returns the first path that exists, or nil if none found."
+  (let ((candidates
+         (list (expand-file-name "bin/tmux" claude-code-emacs-panes--package-dir)
+               (expand-file-name "~/.config/emacs/.local/straight/repos/claude-code-emacs-panes/bin/tmux")
+               (expand-file-name "~/code/emacs-packages/claude-code-emacs-panes/bin/tmux"))))
+    (cl-find-if #'file-exists-p candidates)))
+
+(defun claude-code-emacs-panes--validate-and-fix-shim ()
+  "Validate the tmux shim and auto-fix permissions if needed.
+Called lazily on first agent spawn (not at startup).  Uses a latch pattern:
+after the first call, `claude-code-emacs-panes--shim-validated' is set to
+either t (working) or \\='fallback (not found), and subsequent calls return
+immediately without re-checking."
+  ;; Latch: skip after first check (both t and 'fallback are non-nil)
+  (unless claude-code-emacs-panes--shim-validated
+    (let* ((primary (expand-file-name "bin/tmux" claude-code-emacs-panes--package-dir))
+           (found (claude-code-emacs-panes--find-shim)))
+      (cond
+       ((null found)
+        ;; No shim found anywhere — latch into fallback mode
+        (setq claude-code-emacs-panes--shim-validated 'fallback)
+        (message "claude-code-emacs-panes: tmux shim not found, falling back to native tmux"))
+       (t
+        ;; Found the shim — ensure it is executable
+        (unless (file-executable-p found)
+          (set-file-modes found #o755)
+          (message "claude-code-emacs-panes: Fixed shim permissions at %s" found))
+        ;; If found at a fallback location (not the primary), copy it to primary bin/
+        (when (and (not (string= found primary))
+                   (file-writable-p (file-name-directory primary)))
+          (make-directory (file-name-directory primary) t)
+          (copy-file found primary t)
+          (set-file-modes primary #o755)
+          (message "claude-code-emacs-panes: Copied shim from %s to %s" found primary)
+          (setq found primary))
+        ;; Cache the validated path and set latch
+        (setq claude-code-emacs-panes--shim-path found)
+        (setq claude-code-emacs-panes--shim-validated t))))))
+
 (defun claude-code-emacs-panes--shim-dir ()
-  "Return the path to the bin/ directory shipped with this package."
-  (expand-file-name "bin" claude-code-emacs-panes--package-dir))
+  "Return the path to the bin/ directory shipped with this package.
+If the shim has been validated and cached, use the cached path's directory.
+Otherwise fall back to the package directory."
+  (if claude-code-emacs-panes--shim-path
+      (file-name-directory claude-code-emacs-panes--shim-path)
+    (expand-file-name "bin" claude-code-emacs-panes--package-dir)))
 
 ;;; --- Environment injection / setup --------------------------------------
 
@@ -323,14 +381,21 @@ Captured at load time because `load-file-name' is nil at runtime.")
   "Around-advice for `claude-code-ide--start-session'.
 Injects pane env vars into both `vterm-environment' (for vterm backend)
 and `process-environment' (for eat backend).
+Validates the shim on first call (lazy check).  If the shim is not found,
+falls back to calling ORIG-FN without any modifications.
 ORIG-FN is the original function, ARGS are its arguments."
-  (let* ((extra (claude-code-emacs-panes--env-vars))
-         ;; vterm reads vterm-environment to set env vars in the terminal
-         (vterm-environment (append extra (when (boundp 'vterm-environment)
-                                            vterm-environment)))
-         ;; eat reads process-environment
-         (process-environment (append extra (cl-copy-list process-environment))))
-    (apply orig-fn args)))
+  ;; Lazy shim validation — runs once per Emacs session (latch pattern)
+  (claude-code-emacs-panes--validate-and-fix-shim)
+  (if (eq claude-code-emacs-panes--shim-validated 'fallback)
+      ;; Shim not available — fall back to native tmux, no env injection
+      (apply orig-fn args)
+    (let* ((extra (claude-code-emacs-panes--env-vars))
+           ;; vterm reads vterm-environment to set env vars in the terminal
+           (vterm-environment (append extra (when (boundp 'vterm-environment)
+                                              vterm-environment)))
+           ;; eat reads process-environment
+           (process-environment (append extra (cl-copy-list process-environment))))
+      (apply orig-fn args))))
 
 (defun claude-code-emacs-panes-start-claude ()
   "Start a Claude Code session with pane environment injected.
