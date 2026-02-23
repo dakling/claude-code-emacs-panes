@@ -101,10 +101,15 @@ CLAUDE_CODE_EMACS_PANES, EMACS_PANES_SERVER) into the new vterm buffer via
          (when (memq (process-status process) '(exit signal))
            (let ((entry (gethash pane-id claude-code-emacs-panes--registry)))
              (when entry (plist-put entry :finished t)))))))
-    ;; Show the buffer in some window.
-    (display-buffer buf '((display-buffer-reuse-window
-                           display-buffer-pop-up-window)
-                          (inhibit-same-window . t)))
+    ;; Show the buffer in a window of the user's visible frame.
+    ;; When called via emacsclient --eval, selected-frame may be a
+    ;; transient daemon frame, so we explicitly pick a visible one.
+    (let ((target-frame (or (car (filtered-frame-list #'frame-visible-p))
+                            (selected-frame))))
+      (with-selected-frame target-frame
+        (display-buffer buf '((display-buffer-reuse-window
+                               display-buffer-pop-up-window)
+                              (inhibit-same-window . t)))))
     pane-id))
 
 (defun claude-code-emacs-panes-send-keys (pane-id command)
