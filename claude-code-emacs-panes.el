@@ -281,10 +281,12 @@ Returns \"ok\"."
 
 (define-derived-mode claude-code-emacs-panes-dashboard-mode tabulated-list-mode
   "Panes"
-  "Major mode for the claude-code-emacs-panes dashboard."
-  (when (fboundp 'evil-define-key*)
-    (evil-define-key* 'normal claude-code-emacs-panes-dashboard-mode-map
-      (kbd "RET") #'claude-code-emacs-panes-dashboard-open)))
+  "Major mode for the claude-code-emacs-panes dashboard.")
+
+(when (fboundp 'evil-define-key)
+  (evil-define-key 'normal claude-code-emacs-panes-dashboard-mode-map
+    (kbd "RET") #'claude-code-emacs-panes-dashboard-open
+    (kbd "q") #'quit-window))
 
 (defun claude-code-emacs-panes-dashboard-open ()
   "Open the pane at point in a split window."
