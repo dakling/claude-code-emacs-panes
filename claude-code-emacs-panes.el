@@ -272,6 +272,29 @@ Returns \"ok\"."
         (when buf
           (pop-to-buffer buf))))))
 
+(defvar claude-code-emacs-panes-dashboard-mode-map
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map tabulated-list-mode-map)
+    (define-key map (kbd "RET") #'claude-code-emacs-panes-dashboard-open)
+    map)
+  "Keymap for `claude-code-emacs-panes-dashboard-mode'.")
+
+(define-derived-mode claude-code-emacs-panes-dashboard-mode tabulated-list-mode
+  "Panes"
+  "Major mode for the claude-code-emacs-panes dashboard.")
+
+(defun claude-code-emacs-panes-dashboard-open ()
+  "Open the pane at point in a split window."
+  (interactive)
+  (let* ((id (tabulated-list-get-id))
+         (entry (and id (gethash id claude-code-emacs-panes--registry)))
+         (buf (and entry (plist-get entry :buffer))))
+    (if (and buf (buffer-live-p buf))
+        (display-buffer buf '((display-buffer-reuse-window
+                               display-buffer-pop-up-window)
+                              (inhibit-same-window . t)))
+      (message "Pane buffer is no longer live."))))
+
 (defun claude-code-emacs-panes-dashboard ()
   "Show a tabulated dashboard of all panes."
   (interactive)
@@ -279,7 +302,7 @@ Returns \"ok\"."
     (with-current-buffer buf
       (let ((inhibit-read-only t))
         (erase-buffer))
-      (tabulated-list-mode)
+      (claude-code-emacs-panes-dashboard-mode)
       (setq tabulated-list-format
             [("Pane ID" 18 t)
              ("Name/Title" 30 t)
