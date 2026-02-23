@@ -382,7 +382,10 @@ Otherwise fall back to the package directory."
           "CLAUDE_CODE_EMACS_PANES=1"
           "CLAUDE_CODE_EMACS_PANES_DEBUG=1"
           (format "CLAUDE_CODE_EMACS_PANES_PID=%s" pid-tag)
-          (format "EMACS_PANES_SERVER=%s" (or server-name "server")))))
+          (format "EMACS_PANES_SERVER=%s"
+                  (if (and (boundp 'server-socket-dir) server-socket-dir)
+                      (expand-file-name (or server-name "server") server-socket-dir)
+                    (or server-name "server"))))))
 
 (defun claude-code-emacs-panes--inject-env (orig-fn &rest args)
   "Around-advice for `claude-code-ide--start-session'.
