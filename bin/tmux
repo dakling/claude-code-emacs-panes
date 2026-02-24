@@ -445,7 +445,36 @@ case "$subcmd" in
 
     # --- set-option ---
     set-option|set)
-        log_debug "set-option: $*"
+        target_pane=""
+        option_name=""
+        option_value=""
+        local_flag=false
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                -p) local_flag=true ;;
+                -t) shift; target_pane="$1" ;;
+                -*) ;;
+                *)
+                    if [[ -z "$option_name" ]]; then
+                        option_name="$1"
+                    elif [[ -z "$option_value" ]]; then
+                        option_value="$1"
+                    fi
+                    ;;
+            esac
+            shift
+        done
+
+        log_debug "set-option: target=$target_pane option=$option_name value=$option_value"
+
+        # Cache color from pane-border-style for later use by select-pane -T
+        if [[ "$local_flag" == true && "$option_name" == "pane-border-style" && -n "$target_pane" ]]; then
+            if [[ "$option_value" =~ fg=([a-zA-Z#0-9]+) ]]; then
+                local color="${BASH_REMATCH[1]}"
+                echo "$color" > "$STATE_DIR/color-${target_pane//%/_}"
+                log_debug "Cached color for $target_pane: $color"
+            fi
+        fi
         exit 0
         ;;
 
@@ -477,7 +506,14 @@ case "$subcmd" in
         if [[ -n "$target_pane" && -n "$title" ]]; then
             escaped_pane=$(elisp_escape "$target_pane")
             escaped_title=$(elisp_escape "$title")
-            emacs_eval "(claude-code-emacs-panes-set-pane-info \"$escaped_pane\" \"$escaped_title\" nil)" > /dev/null
+            # Load cached color if available
+            local color_file="$STATE_DIR/color-${target_pane//%/_}"
+            local color=""
+            if [[ -f "$color_file" ]]; then
+                color=$(< "$color_file")
+            fi
+            escaped_color=$(elisp_escape "$color")
+            emacs_eval "(claude-code-emacs-panes-set-pane-info \"$escaped_pane\" \"$escaped_title\" \"$escaped_color\")" > /dev/null
         fi
         exit 0
         ;;
