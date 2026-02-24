@@ -600,5 +600,37 @@ our shim intercepts)."
         (setq claude-code-ide-cli-extra-flags
               (string-trim (concat existing " --teammate-mode tmux")))))))
 
+(defun claude-code-emacs-panes-smoke-test ()
+  "Verify the panes integration is correctly set up.
+Checks: package loaded, shim exists and is executable, Emacs server running,
+advice installed on claude-code-ide--start-session, --teammate-mode configured.
+Reports pass/fail to *Messages*.  Returns t if all checks pass."
+  (interactive)
+  (let ((pass 0) (fail 0))
+    (cl-flet ((check (label condition)
+                (if condition
+                    (progn (cl-incf pass)
+                           (message "  PASS: %s" label))
+                  (progn (cl-incf fail)
+                         (message "  FAIL: %s" label)))))
+      (message "=== claude-code-emacs-panes smoke test ===")
+      (check "package loaded" (featurep 'claude-code-emacs-panes))
+      (let ((shim (claude-code-emacs-panes--find-shim)))
+        (check "shim found" (not (null shim)))
+        (check "shim executable" (and shim (file-executable-p shim)))
+        (when shim
+          (message "    shim path: %s" shim)))
+      (check "emacs server running" (server-running-p))
+      (check "env-inject advice active"
+             (advice-member-p #'claude-code-emacs-panes--inject-env
+                              'claude-code-ide--start-session))
+      (check "--teammate-mode in cli flags"
+             (and (boundp 'claude-code-ide-cli-extra-flags)
+                  (stringp claude-code-ide-cli-extra-flags)
+                  (string-match-p "--teammate-mode tmux"
+                                  claude-code-ide-cli-extra-flags)))
+      (message "=== Result: %d passed, %d failed ===" pass fail))
+    (= fail 0)))
+
 (provide 'claude-code-emacs-panes)
 ;;; claude-code-emacs-panes.el ends here
