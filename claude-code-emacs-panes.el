@@ -63,6 +63,9 @@
 (defvar claude-code-emacs-panes--saved-window-config nil
   "Saved window configuration before showing panes.")
 
+(defvar-local claude-code-emacs-panes--dim-cookie nil
+  "Cookie from `face-remap-add-relative' for finished-state dimming.")
+
 ;;; --- Functions called by the shim (via emacsclient --eval) ---------------
 
 (defun claude-code-emacs-panes-create-pane (&optional name)
@@ -100,7 +103,10 @@ CLAUDE_CODE_EMACS_PANES, EMACS_PANES_SERVER) into the new vterm buffer via
        (lambda (process _event)
          (when (memq (process-status process) '(exit signal))
            (let ((entry (gethash pane-id claude-code-emacs-panes--registry)))
-             (when entry (plist-put entry :finished t)))))))
+             (when entry
+               (plist-put entry :finished t)
+               (claude-code-emacs-panes--mark-finished-visually pane-id entry)
+               (claude-code-emacs-panes--check-team-completion)))))))
     ;; Show the buffer in a window of the user's visible frame.
     ;; When called via emacsclient --eval, selected-frame may be a
     ;; transient daemon frame, so we explicitly pick a visible one.
@@ -109,7 +115,8 @@ CLAUDE_CODE_EMACS_PANES, EMACS_PANES_SERVER) into the new vterm buffer via
       (with-selected-frame target-frame
         (display-buffer buf '((display-buffer-reuse-window
                                display-buffer-pop-up-window)
-                              (inhibit-same-window . t)))))
+                              (inhibit-same-window . t)
+                              (inhibit-switch-frame . t)))))
     pane-id))
 
 (defun claude-code-emacs-panes-send-keys (pane-id command)
@@ -145,21 +152,67 @@ Returns \"ok\"."
 
 (defun claude-code-emacs-panes-set-pane-info (pane-id title color)
   "Set TITLE and COLOR for the pane identified by PANE-ID.
-COLOR is used for a header-line indicator dot.  Returns \"ok\"."
+COLOR is a color name string (e.g., \"blue\", \"#3399ff\") or empty string.
+Updates the header-line to show running status with colored indicator."
   (let* ((entry (gethash pane-id claude-code-emacs-panes--registry))
-         (buf (and entry (plist-get entry :buffer))))
+         (buf (and entry (plist-get entry :buffer)))
+         (effective-color (and color (not (string-empty-p color)) color)))
     (when entry
       (plist-put entry :title title)
-      (plist-put entry :color color))
+      (plist-put entry :color effective-color))
     (when (and buf (buffer-live-p buf))
       (with-current-buffer buf
-        (setq header-line-format
-              (format " %s %s"
-                      (if color
-                          (propertize "\u25cf" 'face `(:foreground ,color))
-                        "\u25cf")
-                      (or title pane-id))))))
+        ;; Only set running header if not already finished
+        (unless (and entry (plist-get entry :finished))
+          (setq header-line-format
+                (list " "
+                      (propertize "\u25cf"
+                                  'face `(:foreground ,(or effective-color "white")))
+                      " "
+                      (propertize (or title pane-id) 'face 'bold)
+                      " "
+                      (propertize "[running]" 'face 'success)))))))
   "ok")
+
+(defun claude-code-emacs-panes--mark-finished-visually (pane-id entry)
+  "Update visual state of PANE-ID's buffer to indicate finished status.
+Changes header-line to dimmed style and applies best-effort face-remap
+to dim the buffer background."
+  (let ((buf (plist-get entry :buffer)))
+    (when (and buf (buffer-live-p buf))
+      (with-current-buffer buf
+        ;; Update header-line to finished style
+        (let ((title (or (plist-get entry :title) pane-id)))
+          (setq header-line-format
+                (list " "
+                      (propertize "\u25cb" 'face 'shadow)
+                      " "
+                      (propertize title 'face 'shadow)
+                      " "
+                      (propertize "[finished]" 'face '(:inherit shadow :weight bold)))))
+        ;; Best-effort background dim via face remapping
+        (unless claude-code-emacs-panes--dim-cookie
+          (setq claude-code-emacs-panes--dim-cookie
+                (face-remap-add-relative 'default
+                                         :foreground (face-foreground 'shadow nil t)
+                                         :background (face-background 'shadow nil t))))))))
+
+(defun claude-code-emacs-panes--check-team-completion ()
+  "Check if all registered live panes are finished; notify if so.
+Counts running vs finished panes. When all are finished (and at least
+one exists), displays a minibuffer notification."
+  (let ((running 0)
+        (finished 0))
+    (maphash (lambda (_id entry)
+               (when (buffer-live-p (plist-get entry :buffer))
+                 (if (plist-get entry :finished)
+                     (cl-incf finished)
+                   (cl-incf running))))
+             claude-code-emacs-panes--registry)
+    (when (and (> finished 0) (= running 0))
+      (message "All %d agent%s finished"
+               finished
+               (if (= finished 1) "" "s")))))
 
 (defun claude-code-emacs-panes-send-interrupt (pane-id)
   "Send an interrupt (C-c) to the vterm pane identified by PANE-ID.
