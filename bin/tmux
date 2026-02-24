@@ -49,6 +49,9 @@ emacs_eval() {
     if [[ $exit_code -ne 0 ]]; then
         err_msg=$(< "$STATE_DIR/emacsclient-err" 2>/dev/null)
         log_debug "emacsclient FAILED (exit $exit_code): $err_msg"
+        # Always log errors to persistent file (not just in debug mode) — OBSV-01
+        echo "[$(date '+%H:%M:%S')] [$$] ERROR: emacsclient failed (exit $exit_code): $err_msg" >> "$LOG_FILE"
+        echo "  Command was: $1" >> "$LOG_FILE"
         echo "" >&2
         echo ""
         return 1
