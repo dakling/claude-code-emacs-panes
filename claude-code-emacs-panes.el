@@ -63,6 +63,9 @@
 (defvar claude-code-emacs-panes--saved-window-config nil
   "Saved window configuration before showing panes.")
 
+(defvar claude-code-emacs-panes--dashboard-timer nil
+  "Repeating timer for dashboard auto-refresh.")
+
 (defvar-local claude-code-emacs-panes--dim-cookie nil
   "Cookie from `face-remap-add-relative' for finished-state dimming.")
 
@@ -323,12 +326,51 @@ Returns \"ok\"."
       (let* ((choice (completing-read "Pane: " candidates nil t))
              (buf (cdr (assoc choice candidates))))
         (when buf
-          (pop-to-buffer buf))))))
+          (switch-to-buffer buf))))))
+
+(defun claude-code-emacs-panes--refresh-dashboard-if-visible ()
+  "Refresh the dashboard buffer if it is currently visible in any frame.
+If the buffer is no longer visible, stop the timer to save resources."
+  (let ((buf (get-buffer "*claude-panes-dashboard*")))
+    (if (and buf (get-buffer-window buf 'visible))
+        (with-current-buffer buf
+          (let ((entries nil))
+            (maphash
+             (lambda (id entry)
+               (let* ((buf-live (buffer-live-p (plist-get entry :buffer)))
+                      (title (or (plist-get entry :title)
+                                 (plist-get entry :name)
+                                 ""))
+                      (status (cond
+                               ((not buf-live) (propertize "dead" 'face 'error))
+                               ((plist-get entry :finished) (propertize "finished" 'face 'shadow))
+                               (t (propertize "running" 'face 'success))))
+                      (created (format-time-string "%Y-%m-%d %H:%M:%S"
+                                                   (plist-get entry :created-at))))
+                 (push (list id (vector id title status created)) entries)))
+             claude-code-emacs-panes--registry)
+            (setq tabulated-list-entries entries))
+          (tabulated-list-print t))  ; t = preserve cursor position
+      ;; Buffer not visible — stop the timer to save resources
+      (claude-code-emacs-panes--stop-dashboard-timer))))
+
+(defun claude-code-emacs-panes--start-dashboard-timer ()
+  "Start the dashboard refresh timer (2-second interval)."
+  (unless claude-code-emacs-panes--dashboard-timer
+    (setq claude-code-emacs-panes--dashboard-timer
+          (run-with-timer 2 2 #'claude-code-emacs-panes--refresh-dashboard-if-visible))))
+
+(defun claude-code-emacs-panes--stop-dashboard-timer ()
+  "Stop the dashboard refresh timer."
+  (when claude-code-emacs-panes--dashboard-timer
+    (cancel-timer claude-code-emacs-panes--dashboard-timer)
+    (setq claude-code-emacs-panes--dashboard-timer nil)))
 
 (defvar claude-code-emacs-panes-dashboard-mode-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map tabulated-list-mode-map)
     (define-key map (kbd "RET") #'claude-code-emacs-panes-dashboard-open)
+    (define-key map (kbd "D") #'claude-code-emacs-panes-close-finished)
     map)
   "Keymap for `claude-code-emacs-panes-dashboard-mode'.")
 
@@ -369,17 +411,39 @@ Returns \"ok\"."
                              (plist-get entry :name)
                              ""))
                   (status (cond
-                           ((not buf-live) "dead")
-                           ((plist-get entry :finished) "finished")
-                           (t "running")))
+                           ((not buf-live) (propertize "dead" 'face 'error))
+                           ((plist-get entry :finished) (propertize "finished" 'face 'shadow))
+                           (t (propertize "running" 'face 'success))))
                   (created (format-time-string "%Y-%m-%d %H:%M:%S"
                                                (plist-get entry :created-at))))
              (push (list id (vector id title status created)) entries)))
          claude-code-emacs-panes--registry)
         (setq tabulated-list-entries entries))
       (tabulated-list-init-header)
-      (tabulated-list-print))
+      (tabulated-list-print)
+      ;; Start auto-refresh timer
+      (claude-code-emacs-panes--start-dashboard-timer)
+      ;; Stop timer when dashboard buffer is killed
+      (add-hook 'kill-buffer-hook #'claude-code-emacs-panes--stop-dashboard-timer nil t))
     (pop-to-buffer buf)))
+
+(defun claude-code-emacs-panes-close-finished ()
+  "Kill all finished panes and remove them from the registry."
+  (interactive)
+  (let ((count 0)
+        (to-remove nil))
+    (maphash (lambda (id entry)
+               (when (plist-get entry :finished)
+                 (let ((buf (plist-get entry :buffer)))
+                   (when (and buf (buffer-live-p buf))
+                     (kill-buffer buf)))
+                 (push id to-remove)
+                 (cl-incf count)))
+             claude-code-emacs-panes--registry)
+    ;; Remove outside maphash to avoid modifying hash during iteration
+    (dolist (id to-remove)
+      (remhash id claude-code-emacs-panes--registry))
+    (message "Closed %d finished pane%s" count (if (= count 1) "" "s"))))
 
 ;;; --- Shim directory helper ----------------------------------------------
 
